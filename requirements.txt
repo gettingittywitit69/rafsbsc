@@ -1,5 +1,6 @@
 numpy>=1.24
 pandas>=2.0
+pyarrow>=16.0
 scipy>=1.9
 setuptools>=68
 arch>=6.3
