@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import math
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import product
 from pathlib import Path
@@ -12,6 +13,7 @@ from numpy.random import Generator, SeedSequence, default_rng
 from scipy.stats import kurtosis, norm, skew
 
 from arch.univariate import ARX, ConstantMean, ConstantVariance, GARCH, Normal, StudentsT
+from arch.utility.exceptions import StartingValueWarning
 
 DGP_LIST: tuple[str, ...] = ("iid_normal", "iid_t5", "ar1_t5", "garch11_t5")
 N_GRID: tuple[int, ...] = (120, 240, 1200)
@@ -170,7 +172,12 @@ def simulate_dgp(
     return series
 
 
-def fit_candidate(train: np.ndarray, name: str):
+def fit_candidate(
+    train: np.ndarray,
+    name: str,
+    starting_values: np.ndarray | None = None,
+    maxiter: int = 500,
+):
     train_arr = np.asarray(train, dtype=float)
     if train_arr.ndim != 1:
         raise ValueError("train must be a 1d array")
@@ -190,6 +197,10 @@ def fit_candidate(train: np.ndarray, name: str):
         model = ConstantMean(train_arr)
         model.volatility = GARCH(p=1, o=0, q=1)
         model.distribution = StudentsT()
+    elif name == "garch11_normal":
+        model = ConstantMean(train_arr)
+        model.volatility = GARCH(p=1, o=0, q=1)
+        model.distribution = Normal()
     elif name == "ar1_garch11_t":
         model = ARX(train_arr, lags=1)
         model.volatility = GARCH(p=1, o=0, q=1)
@@ -197,7 +208,28 @@ def fit_candidate(train: np.ndarray, name: str):
     else:
         raise ValueError(f"Unknown candidate model {name}")
 
-    res = model.fit(disp="off")
+    fit_kwargs = {
+        "disp": "off",
+        "tol": 1e-6,
+        "options": {"maxiter": int(maxiter)},
+    }
+    try:
+        if starting_values is None:
+            res = model.fit(**fit_kwargs)
+        else:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", StartingValueWarning)
+                res = model.fit(starting_values=starting_values, **fit_kwargs)
+            if any(issubclass(w.category, StartingValueWarning) for w in caught):
+                raise ValueError("starting values were rejected")
+    except Exception:
+        if starting_values is None:
+            raise
+        res = model.fit(
+            disp="off",
+            tol=1e-6,
+            options={"maxiter": 500},
+        )
     return model, res, np.asarray(res.params, dtype=float)
 
 
