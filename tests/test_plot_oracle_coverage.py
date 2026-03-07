@@ -10,14 +10,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from finance_data.bsc.plotting import plot_oracle_coverage, plot_oracle_se, write_plotly_png
 
 
-def _stub_write_image(monkeypatch) -> list[Path]:
-    calls: list[Path] = []
+def _annotation_texts(fig: Figure) -> set[str]:
+    return {str(a.text) for a in (fig.layout.annotations or ())}
+
+
+def _stub_write_image(monkeypatch) -> list[tuple[Path, dict[str, object]]]:
+    calls: list[tuple[Path, dict[str, object]]] = []
 
     def fake_write_image(self, path, *args, **kwargs) -> None:
         out_path = Path(path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(b"png")
-        calls.append(out_path)
+        calls.append((out_path, dict(kwargs)))
 
     monkeypatch.setattr(BaseFigure, "write_image", fake_write_image)
     return calls
@@ -37,10 +41,15 @@ def test_plot_oracle_coverage_smoke(tmp_path, monkeypatch) -> None:
     out_html = tmp_path / "test.html"
     fig = plot_oracle_coverage(df, out_html=str(out_html))
     assert fig is not None
-    assert calls == [out_html.with_suffix(".png")]
+    assert [p for p, _ in calls] == [out_html.with_suffix(".png")]
     assert out_html.with_suffix(".png").exists()
     assert not out_html.exists()
     assert fig.layout.legend.title.text == "n"
+    assert fig.layout.xaxis.title.text in (None, "")
+    assert fig.layout.yaxis.title.text in (None, "")
+    ann = _annotation_texts(fig)
+    assert "True Sharpe" in ann
+    assert "95% Coverage" in ann
 
 
 def test_plot_oracle_coverage_accepts_legacy_t_alias() -> None:
@@ -56,6 +65,8 @@ def test_plot_oracle_coverage_accepts_legacy_t_alias() -> None:
     fig = plot_oracle_coverage(df)
     assert fig is not None
     assert fig.layout.legend.title.text == "n"
+    assert fig.layout.xaxis.title.text in (None, "")
+    assert fig.layout.yaxis.title.text in (None, "")
 
 
 def test_plot_oracle_coverage_requires_columns() -> None:
@@ -97,11 +108,15 @@ def test_plot_oracle_se_smoke(tmp_path, monkeypatch) -> None:
     out_html = tmp_path / "oracle-se.html"
     fig = plot_oracle_se(df, out_html=str(out_html))
     assert fig is not None
-    assert calls == [out_html.with_suffix(".png")]
+    assert [p for p, _ in calls] == [out_html.with_suffix(".png")]
     assert out_html.with_suffix(".png").exists()
     assert not out_html.exists()
     assert fig.layout.legend.title.text == "n"
-    assert fig.layout.yaxis.title.text == "Average Oracle SE"
+    assert fig.layout.xaxis.title.text in (None, "")
+    assert fig.layout.yaxis.title.text in (None, "")
+    ann = _annotation_texts(fig)
+    assert "True Sharpe" in ann
+    assert "Average Oracle SE" in ann
 
 
 def test_plot_oracle_se_accepts_legacy_t_alias() -> None:
@@ -131,11 +146,17 @@ def test_write_plotly_png_coerces_html_alias_and_preserves_png(monkeypatch, tmp_
     calls = _stub_write_image(monkeypatch)
 
     out_from_html = write_plotly_png(Figure(), tmp_path / "oracle.html")
-    out_from_png = write_plotly_png(Figure(), tmp_path / "oracle-se.png")
+    out_from_png = write_plotly_png(Figure(), tmp_path / "oracle-se.png", width=1800, height=1200, scale=3.0)
 
     assert out_from_html == tmp_path / "oracle.png"
     assert out_from_png == tmp_path / "oracle-se.png"
-    assert calls == [tmp_path / "oracle.png", tmp_path / "oracle-se.png"]
+    assert [p for p, _ in calls] == [tmp_path / "oracle.png", tmp_path / "oracle-se.png"]
+    assert calls[0][1]["width"] == 3200
+    assert calls[0][1]["height"] == 2000
+    assert calls[0][1]["scale"] == 2.0
+    assert calls[1][1]["width"] == 1800
+    assert calls[1][1]["height"] == 1200
+    assert calls[1][1]["scale"] == 3.0
 
 
 def test_write_plotly_png_raises_clear_error_when_backend_missing(monkeypatch, tmp_path) -> None:

@@ -1,6 +1,8 @@
 from pathlib import Path
 import sys
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -88,6 +90,57 @@ def test_eta_scales_monotonically_with_rep_counts(monkeypatch) -> None:
     est_small = eta.estimate_main_bundle_runtime(cfg_small, pilot_cells=2, pilot_R=10, pilot_R_garch=5)
     est_large = eta.estimate_main_bundle_runtime(cfg_large, pilot_cells=2, pilot_R=10, pilot_R_garch=5)
     assert est_large.eta_seconds > est_small.eta_seconds
+
+
+def test_eta_uses_observed_parallel_probe_speedup(monkeypatch) -> None:
+    monkeypatch.setattr(eta, "_cache_hit_for_main", lambda *args, **kwargs: False)
+    monkeypatch.setattr(eta, "_time_single_cell", lambda *args, **kwargs: 0.1)
+    monkeypatch.setattr(eta, "_time_pilot_specs_parallel", lambda *args, **kwargs: 0.08)
+
+    cfg = api.default_config(
+        R=100,
+        R_garch=20,
+        dgps=("iid_normal",),
+        methods=(api.ANALYTIC_METHOD,),
+        n_grid=(30, 60),
+        S_grid=(0.0,),
+        max_workers=4,
+    )
+
+    estimate = eta.estimate_main_bundle_runtime(cfg, pilot_cells=2, pilot_R=10, pilot_R_garch=10)
+
+    assert estimate.eta_seconds == pytest.approx(1.0, rel=1e-9, abs=1e-9)
+    assert estimate.eta_low_seconds == pytest.approx(1.0, rel=1e-9, abs=1e-9)
+    assert estimate.eta_high_seconds == pytest.approx(1.0, rel=1e-9, abs=1e-9)
+    assert "observed_speedup=2.00" in estimate.notes
+
+
+def test_eta_parallel_probe_failure_uses_conservative_speedup(monkeypatch) -> None:
+    monkeypatch.setattr(eta, "_cache_hit_for_main", lambda *args, **kwargs: False)
+    monkeypatch.setattr(eta, "_time_single_cell", lambda *args, **kwargs: 0.1)
+
+    def fail_probe(*args, **kwargs):
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(eta, "_time_pilot_specs_parallel", fail_probe)
+
+    cfg = api.default_config(
+        R=100,
+        R_garch=20,
+        dgps=("iid_normal",),
+        methods=(api.ANALYTIC_METHOD,),
+        n_grid=(30, 60),
+        S_grid=(0.0,),
+        max_workers=4,
+    )
+
+    estimate = eta.estimate_main_bundle_runtime(cfg, pilot_cells=2, pilot_R=10, pilot_R_garch=10)
+
+    assert estimate.eta_seconds == pytest.approx(2.0, rel=1e-9, abs=1e-9)
+    assert estimate.eta_low_seconds == pytest.approx(2.0, rel=1e-9, abs=1e-9)
+    assert estimate.eta_high_seconds == pytest.approx(2.0, rel=1e-9, abs=1e-9)
+    assert "parallel probe failed" in estimate.notes
+    assert "conservative speedup=1.00" in estimate.notes
 
 
 def test_eta_cli_prints_estimate(monkeypatch, capsys) -> None:

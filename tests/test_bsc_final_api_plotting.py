@@ -9,6 +9,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import finance_data.bsc.api as api
 
 
+def _annotation_texts(fig: Figure) -> set[str]:
+    return {str(a.text) for a in (fig.layout.annotations or ())}
+
+
 def _sample_results() -> pd.DataFrame:
     rows: list[dict[str, float | str | int]] = []
     for dgp in ("iid_normal", "garch11_t"):
@@ -59,8 +63,9 @@ def test_plot_all_returns_plotly_figures_for_all_metrics() -> None:
 
     figs = api.plot_all(_sample_results(), _sample_diagnostics(), cfg)
 
-    assert set(figs.keys()) == {"coverage_95", "reject_rate_H0_S_eq_0", "rmse", "bias"}
+    assert set(figs.keys()) == {"coverage_95", "coverage_95_vs_n", "reject_rate_H0_S_eq_0", "rmse", "bias"}
     assert all(isinstance(fig, Figure) for fig in figs.values())
+    assert all(getattr(fig.layout.title, "text", None) in (None, "") for fig in figs.values())
 
 
 def test_plot_grid_coverage_uses_error_bars_when_mc_bounds_exist() -> None:
@@ -81,6 +86,40 @@ def test_plot_grid_coverage_uses_error_bars_when_mc_bounds_exist() -> None:
     )
 
     assert isinstance(fig, Figure)
+    assert any(trace.error_y is not None and trace.error_y.array is not None for trace in fig.data)
+    assert fig.layout.xaxis.title.text in (None, "")
+    assert fig.layout.yaxis.title.text in (None, "")
+    ann = _annotation_texts(fig)
+    assert "True Sharpe" in ann
+    assert "95% coverage" in ann
+
+
+def test_plot_all_coverage_vs_n_orientation_and_grouping() -> None:
+    cfg = api.default_config(
+        dgps=("iid_normal", "garch11_t"),
+        methods=(api.ANALYTIC_METHOD, api.GARCH_MLE_METHOD),
+        n_grid=(30, 60),
+        S_grid=(-0.5, 0.0, 0.5),
+        max_workers=1,
+    )
+
+    figs = api.plot_all(_sample_results(), _sample_diagnostics(), cfg)
+    fig = figs["coverage_95_vs_n"]
+
+    assert isinstance(fig, Figure)
+    assert fig.layout.legend.title.text == "True Sharpe"
+    assert fig.layout.xaxis.title.text in (None, "")
+    assert fig.layout.yaxis.title.text in (None, "")
+    assert set(str(trace.name) for trace in fig.data) == {"-0.5", "0", "0.5"}
+    assert all(list(trace.x) == sorted(trace.x) for trace in fig.data)
+    assert all(set(trace.x) <= {30, 60} for trace in fig.data)
+    ann = _annotation_texts(fig)
+    assert "iid_normal" in ann
+    assert "garch11_t" in ann
+    assert api.ANALYTIC_METHOD in ann
+    assert api.GARCH_MLE_METHOD in ann
+    assert "n" in ann
+    assert "95% coverage" in ann
     assert any(trace.error_y is not None and trace.error_y.array is not None for trace in fig.data)
 
 

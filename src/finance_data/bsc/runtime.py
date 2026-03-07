@@ -11,12 +11,14 @@ from __future__ import annotations
 import hashlib
 import os
 import time
+import warnings
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
 from statistics import NormalDist
-from typing import Any
+from typing import Any, Callable
 
 # clamp threads BEFORE numpy import (critical on multi-core nodes)
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -44,6 +46,7 @@ MAXITER_WARM = 80
 MLE_TOL = 1e-6
 
 EPS = 1e-12
+_parallel_fallback_warned = False
 
 
 def stable_seed(*parts: object) -> int:
@@ -870,15 +873,65 @@ def _run_cell_with_ci_sweep(
     return _run_cell_impl(dgp, n, S_true, cfg, ci_levels=ci_levels)
 
 
+def _is_process_pool_bootstrap_error(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return (
+        "start a new process before the current process has finished its bootstrapping phase" in message
+        or "safe importing of main module" in message
+    )
+
+
+def _warn_parallel_fallback_once(exc: BaseException) -> None:
+    global _parallel_fallback_warned
+    if _parallel_fallback_warned:
+        return
+    warnings.warn(
+        f"Process-pool execution failed ({exc.__class__.__name__}); falling back to serial execution.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    _parallel_fallback_warned = True
+
+
+def _run_partA_serial_specs(
+    specs: list[tuple[str, int, float]],
+    cfg: Config,
+) -> list[tuple[list[dict[str, Any]], dict[str, Any]]]:
+    return [_run_cell((d, int(n), float(s), cfg)) for d, n, s in specs]
+
+
+def _run_partA_with_ci_sweep_serial_specs(
+    specs: list[tuple[str, int, float]],
+    cfg: Config,
+    levels: tuple[float, ...],
+    progress_callback: Callable[[], None] | None,
+) -> list[tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]]:
+    out = []
+    for d, n, s in specs:
+        out.append(_run_cell_with_ci_sweep((d, int(n), float(s), cfg, levels)))
+        if progress_callback is not None:
+            progress_callback()
+    return out
+
+
 def run_partA(cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
     specs = list(product(cfg.dgps, cfg.n_grid, cfg.S_grid))
 
     if cfg.max_workers <= 1 or len(specs) <= 1:
-        out = [_run_cell((d, int(n), float(s), cfg)) for d, n, s in specs]
+        out = _run_partA_serial_specs(specs, cfg)
     else:
         workers = min(int(cfg.max_workers), len(specs))
-        with ProcessPoolExecutor(max_workers=workers) as ex:
-            out = list(ex.map(_run_cell, [(d, int(n), float(s), cfg) for d, n, s in specs]))
+        try:
+            with ProcessPoolExecutor(max_workers=workers) as ex:
+                out = list(ex.map(_run_cell, [(d, int(n), float(s), cfg) for d, n, s in specs]))
+        except BrokenProcessPool as exc:
+            _warn_parallel_fallback_once(exc)
+            out = _run_partA_serial_specs(specs, cfg)
+        except RuntimeError as exc:
+            if not _is_process_pool_bootstrap_error(exc):
+                raise
+            _warn_parallel_fallback_once(exc)
+            out = _run_partA_serial_specs(specs, cfg)
 
     rows_m: list[dict[str, Any]] = []
     rows_d: list[dict[str, Any]] = []
@@ -894,16 +947,31 @@ def run_partA(cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
 def run_partA_with_ci_sweep(
     cfg: Config,
     ci_levels: tuple[float, ...] | list[float],
+    *,
+    progress_callback: Callable[[], None] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     levels = normalize_ci_levels(ci_levels)
     specs = list(product(cfg.dgps, cfg.n_grid, cfg.S_grid))
 
     if cfg.max_workers <= 1 or len(specs) <= 1:
-        out = [_run_cell_with_ci_sweep((d, int(n), float(s), cfg, levels)) for d, n, s in specs]
+        out = _run_partA_with_ci_sweep_serial_specs(specs, cfg, levels, progress_callback)
     else:
         workers = min(int(cfg.max_workers), len(specs))
-        with ProcessPoolExecutor(max_workers=workers) as ex:
-            out = list(ex.map(_run_cell_with_ci_sweep, [(d, int(n), float(s), cfg, levels) for d, n, s in specs]))
+        try:
+            with ProcessPoolExecutor(max_workers=workers) as ex:
+                out = []
+                for item in ex.map(_run_cell_with_ci_sweep, [(d, int(n), float(s), cfg, levels) for d, n, s in specs]):
+                    out.append(item)
+                    if progress_callback is not None:
+                        progress_callback()
+        except BrokenProcessPool as exc:
+            _warn_parallel_fallback_once(exc)
+            out = _run_partA_with_ci_sweep_serial_specs(specs, cfg, levels, progress_callback)
+        except RuntimeError as exc:
+            if not _is_process_pool_bootstrap_error(exc):
+                raise
+            _warn_parallel_fallback_once(exc)
+            out = _run_partA_with_ci_sweep_serial_specs(specs, cfg, levels, progress_callback)
 
     rows_m: list[dict[str, Any]] = []
     rows_d: list[dict[str, Any]] = []

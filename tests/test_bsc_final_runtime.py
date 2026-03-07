@@ -1,8 +1,10 @@
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict
 from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -171,6 +173,182 @@ def test_run_partA_with_ci_sweep_has_expected_grid_rows() -> None:
 
     assert len(ci_sweep) == len(expected)
     assert actual == expected
+
+
+def test_run_partA_with_ci_sweep_invokes_progress_callback_for_each_cell_single_worker() -> None:
+    cfg = rt.Config(
+        R=20,
+        R_garch=5,
+        dgps=("iid_normal",),
+        methods=(rt.ANALYTIC_METHOD,),
+        n_grid=(20, 30),
+        S_grid=(0.0, 0.5),
+        max_workers=1,
+    )
+    ticks = {"count": 0}
+
+    def on_cell_complete() -> None:
+        ticks["count"] += 1
+
+    rt.run_partA_with_ci_sweep(cfg, (0.95,), progress_callback=on_cell_complete)
+
+    expected_cells = len(cfg.dgps) * len(cfg.n_grid) * len(cfg.S_grid)
+    assert ticks["count"] == expected_cells
+
+
+def test_run_partA_with_ci_sweep_invokes_progress_callback_for_each_cell_multi_worker() -> None:
+    cfg = rt.Config(
+        R=20,
+        R_garch=5,
+        dgps=("iid_normal",),
+        methods=(rt.ANALYTIC_METHOD,),
+        n_grid=(20, 30),
+        S_grid=(0.0,),
+        max_workers=2,
+    )
+    ticks = {"count": 0}
+
+    def on_cell_complete() -> None:
+        ticks["count"] += 1
+
+    rt.run_partA_with_ci_sweep(cfg, (0.95,), progress_callback=on_cell_complete)
+
+    expected_cells = len(cfg.dgps) * len(cfg.n_grid) * len(cfg.S_grid)
+    assert ticks["count"] == expected_cells
+
+
+def test_run_partA_parallel_failure_falls_back_to_serial(monkeypatch) -> None:
+    cfg = rt.Config(
+        R=20,
+        R_garch=5,
+        dgps=("iid_normal",),
+        methods=(rt.ANALYTIC_METHOD,),
+        n_grid=(20, 30),
+        S_grid=(0.0,),
+        max_workers=2,
+    )
+    calls = {"count": 0}
+
+    def fake_run_cell(spec):
+        dgp, n, s_true, _cfg = spec
+        calls["count"] += 1
+        return (
+            [
+                {
+                    "dgp": dgp,
+                    "method": rt.ANALYTIC_METHOD,
+                    "n": int(n),
+                    "S_true": float(s_true),
+                    "coverage_95": 0.95,
+                    "reject_rate_H0_S_eq_0": 0.05,
+                }
+            ],
+            {"dgp": dgp, "n": int(n), "S_true": float(s_true), "bias": 0.0, "rmse": 0.1},
+        )
+
+    class BrokenPool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def map(self, fn, iterable):
+            raise BrokenProcessPool("pool crashed")
+
+    monkeypatch.setattr(rt, "ProcessPoolExecutor", BrokenPool)
+    monkeypatch.setattr(rt, "_run_cell", fake_run_cell)
+    monkeypatch.setattr(rt, "_parallel_fallback_warned", False)
+
+    with pytest.warns(RuntimeWarning, match="falling back to serial"):
+        results, diagnostics = rt.run_partA(cfg)
+
+    expected_cells = len(cfg.dgps) * len(cfg.n_grid) * len(cfg.S_grid)
+    assert calls["count"] == expected_cells
+    assert len(results) == expected_cells
+    assert len(diagnostics) == expected_cells
+
+
+def test_run_partA_with_ci_sweep_parallel_failure_falls_back_to_serial_and_ticks(monkeypatch) -> None:
+    cfg = rt.Config(
+        R=20,
+        R_garch=5,
+        dgps=("iid_normal",),
+        methods=(rt.ANALYTIC_METHOD,),
+        n_grid=(20, 30),
+        S_grid=(0.0,),
+        max_workers=2,
+    )
+    calls = {"count": 0}
+    ticks = {"count": 0}
+
+    def fake_run_cell_with_ci_sweep(spec):
+        dgp, n, s_true, _cfg, levels = spec
+        calls["count"] += 1
+        ci_level = float(levels[0]) if levels else 0.95
+        return (
+            [
+                {
+                    "dgp": dgp,
+                    "method": rt.ANALYTIC_METHOD,
+                    "n": int(n),
+                    "S_true": float(s_true),
+                    "coverage_95": 0.95,
+                    "reject_rate_H0_S_eq_0": 0.05,
+                }
+            ],
+            {"dgp": dgp, "n": int(n), "S_true": float(s_true), "bias": 0.0, "rmse": 0.1},
+            [
+                {
+                    "dgp": dgp,
+                    "method": rt.ANALYTIC_METHOD,
+                    "n": int(n),
+                    "S_true": float(s_true),
+                    "ci_level": ci_level,
+                    "outer_reps": 20,
+                    "coverage": 0.95,
+                    "avg_ci_length": 0.2,
+                    "mc_se": 0.01,
+                    "mc_lo": 0.93,
+                    "mc_hi": 0.97,
+                    "fit_fail_count": 0,
+                    "fit_fail_rate": 0.0,
+                }
+            ],
+        )
+
+    class BrokenPool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def map(self, fn, iterable):
+            raise BrokenProcessPool("pool crashed")
+
+    def on_cell_complete() -> None:
+        ticks["count"] += 1
+
+    monkeypatch.setattr(rt, "ProcessPoolExecutor", BrokenPool)
+    monkeypatch.setattr(rt, "_run_cell_with_ci_sweep", fake_run_cell_with_ci_sweep)
+    monkeypatch.setattr(rt, "_parallel_fallback_warned", False)
+
+    with pytest.warns(RuntimeWarning, match="falling back to serial"):
+        results, diagnostics, ci_sweep = rt.run_partA_with_ci_sweep(cfg, (0.95,), progress_callback=on_cell_complete)
+
+    expected_cells = len(cfg.dgps) * len(cfg.n_grid) * len(cfg.S_grid)
+    assert calls["count"] == expected_cells
+    assert ticks["count"] == expected_cells
+    assert len(results) == expected_cells
+    assert len(diagnostics) == expected_cells
+    assert len(ci_sweep) == expected_cells
 
 
 def test_ci_sweep_avg_ci_length_is_weakly_increasing_in_ci_level() -> None:

@@ -81,11 +81,24 @@ def _resolve_plotly_png_path(out_html: str | Path) -> Path:
     return out_path.with_suffix(".png")
 
 
-def write_plotly_png(fig: Any, out_html: str | Path) -> Path:
+def write_plotly_png(
+    fig: Any,
+    out_html: str | Path,
+    *,
+    width: int = 3200,
+    height: int = 2000,
+    scale: float = 2.0,
+) -> Path:
     out_path = _resolve_plotly_png_path(out_html)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        fig.write_image(str(out_path))
+        fig.write_image(
+            str(out_path),
+            format="png",
+            width=width,
+            height=height,
+            scale=scale,
+        )
     except Exception as exc:
         raise RuntimeError(
             f"Plotly PNG export failed for `{out_path}`. Ensure `kaleido` is installed and a Chrome/Chromium binary is available."
@@ -93,9 +106,16 @@ def write_plotly_png(fig: Any, out_html: str | Path) -> Path:
     return out_path
 
 
-def _write_plotly_artifacts(fig: Any, out_html: str | None) -> None:
+def _write_plotly_artifacts(
+    fig: Any,
+    out_html: str | None,
+    *,
+    png_width: int = 3200,
+    png_height: int = 2000,
+    png_scale: float = 2.0,
+) -> None:
     if out_html is not None:
-        write_plotly_png(fig, out_html)
+        write_plotly_png(fig, out_html, width=png_width, height=png_height, scale=png_scale)
 
     try:
         from IPython import get_ipython
@@ -107,6 +127,54 @@ def _write_plotly_artifacts(fig: Any, out_html: str | None) -> None:
         pass
 
 
+def _apply_shared_axis_labels(fig: Any, *, x_label: str, y_label: str) -> None:
+    fig.update_xaxes(title_text=None)
+    fig.update_yaxes(title_text=None)
+
+    ann = list(fig.layout.annotations) if fig.layout.annotations else []
+    ann.append(
+        dict(
+            text=x_label,
+            x=0.5,
+            y=-0.12,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+            xanchor="center",
+            yanchor="top",
+        )
+    )
+    ann.append(
+        dict(
+            text=y_label,
+            x=-0.10,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+            textangle=-90,
+            xanchor="right",
+            yanchor="middle",
+        )
+    )
+
+    margin = fig.layout.margin
+    m_l = int(getattr(margin, "l", 0) or 0)
+    m_r = int(getattr(margin, "r", 0) or 0)
+    m_t = int(getattr(margin, "t", 0) or 0)
+    m_b = int(getattr(margin, "b", 0) or 0)
+    fig.update_layout(
+        title_text=None,
+        annotations=ann,
+        margin=dict(
+            l=max(m_l, 110),
+            r=max(m_r, 20),
+            t=max(m_t, 20),
+            b=max(m_b, 100),
+        ),
+    )
+
+
 def _plot_oracle_line_figure(
     plot_df: pd.DataFrame,
     *,
@@ -116,6 +184,9 @@ def _plot_oracle_line_figure(
     y_range: tuple[float, float] | None,
     nominal: float | None = None,
     use_error_bars: bool = False,
+    png_width: int = 3200,
+    png_height: int = 2000,
+    png_scale: float = 2.0,
 ) -> Any:
     try:
         import plotly.express as px
@@ -155,15 +226,15 @@ def _plot_oracle_line_figure(
 
     _install_plotly_ipython_fallback(fig)
     fig.for_each_annotation(lambda ann: ann.update(text=ann.text.replace("dgp=", "")))
-    fig.update_xaxes(title="True Sharpe")
     if y_range is None:
-        fig.update_yaxes(title=ylabel)
+        pass
     else:
         if len(y_range) != 2:
             raise ValueError("y_range must be a (low, high) tuple.")
-        fig.update_yaxes(range=list(y_range), title=ylabel)
-    fig.update_layout(legend_title_text="n", margin=dict(l=50, r=20, t=50, b=50))
-    _write_plotly_artifacts(fig, out_html)
+        fig.update_yaxes(range=list(y_range))
+    fig.update_layout(legend_title_text="n", margin=dict(l=50, r=20, t=20, b=50))
+    _apply_shared_axis_labels(fig, x_label="True Sharpe", y_label=ylabel)
+    _write_plotly_artifacts(fig, out_html, png_width=png_width, png_height=png_height, png_scale=png_scale)
     return fig
 
 
@@ -173,6 +244,9 @@ def plot_oracle_coverage(
     out_html: str | None = None,
     nominal: float = 0.95,
     y_range: tuple[float, float] = (0.85, 1.0),
+    png_width: int = 3200,
+    png_height: int = 2000,
+    png_scale: float = 2.0,
 ) -> Any:
     """
     Plot oracle-analytic Monte Carlo coverage with 95% MC error bars.
@@ -192,6 +266,9 @@ def plot_oracle_coverage(
         y_range=y_range,
         nominal=nominal,
         use_error_bars=True,
+        png_width=png_width,
+        png_height=png_height,
+        png_scale=png_scale,
     )
 
 
@@ -200,6 +277,9 @@ def plot_oracle_se(
     *,
     out_html: str | None = None,
     y_range: tuple[float, float] | None = None,
+    png_width: int = 3200,
+    png_height: int = 2000,
+    png_scale: float = 2.0,
 ) -> Any:
     """
     Plot average oracle standard errors against the true Sharpe ratio.
@@ -215,6 +295,9 @@ def plot_oracle_se(
         ylabel="Average Oracle SE",
         out_html=out_html,
         y_range=y_range,
+        png_width=png_width,
+        png_height=png_height,
+        png_scale=png_scale,
     )
 
 

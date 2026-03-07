@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
 from itertools import product
 from pathlib import Path
@@ -152,6 +153,24 @@ def _time_single_cell(
     return float(time.perf_counter() - start)
 
 
+def _time_pilot_specs_parallel(
+    specs: Sequence[tuple[str, int, float]],
+    *,
+    cfg: Config,
+    ci_levels: tuple[float, ...],
+    workers: int,
+) -> float:
+    if not specs:
+        return 0.0
+    worker_count = max(1, int(workers))
+    payload = [(str(d), int(n), float(s), cfg, ci_levels) for d, n, s in specs]
+    start = time.perf_counter()
+    with ProcessPoolExecutor(max_workers=worker_count) as ex:
+        for _ in ex.map(bsc_runtime._run_cell_with_ci_sweep, payload):
+            pass
+    return float(time.perf_counter() - start)
+
+
 def estimate_main_bundle_runtime(
     cfg: Config,
     *,
@@ -184,6 +203,7 @@ def estimate_main_bundle_runtime(
     pilot_cfg = replace(cfg, R=int(resolved_R), R_garch=int(resolved_Rg))
 
     rates: list[float] = []
+    serial_probe_seconds = 0.0
     for spec in selected_specs:
         elapsed = _time_single_cell(spec, cfg=pilot_cfg, ci_levels=normalized_levels)
         units = _work_units_for_cell(
@@ -194,6 +214,7 @@ def estimate_main_bundle_runtime(
         )
         if units > 0.0 and np.isfinite(elapsed):
             rates.append(float(elapsed / units))
+            serial_probe_seconds += float(elapsed)
 
     if not rates:
         return RuntimeEstimate(
@@ -211,8 +232,34 @@ def estimate_main_bundle_runtime(
     q20, q50, q80 = np.quantile(np.asarray(rates, dtype=float), [0.2, 0.5, 0.8]).tolist()
 
     workers = max(1, min(int(cfg.max_workers), max(1, len(specs))))
-    efficiency = 1.0 if workers == 1 else 0.85
-    parallel_scale = 1.0 / (workers * efficiency)
+    observed_speedup = 1.0
+    speedup_note = "observed_speedup=1.00 (single-worker run)."
+    if workers > 1:
+        if selected_count < 2 or (not np.isfinite(serial_probe_seconds)) or serial_probe_seconds <= 0.0:
+            speedup_note = "insufficient pilot data for parallel probe; used conservative speedup=1.00."
+        else:
+            probe_workers = max(1, min(workers, selected_count))
+            try:
+                probe_parallel_seconds = _time_pilot_specs_parallel(
+                    selected_specs,
+                    cfg=pilot_cfg,
+                    ci_levels=normalized_levels,
+                    workers=probe_workers,
+                )
+                if np.isfinite(probe_parallel_seconds) and probe_parallel_seconds > 0.0:
+                    raw_speedup = serial_probe_seconds / float(probe_parallel_seconds)
+                    observed_speedup = float(np.clip(raw_speedup, 1.0, float(workers)))
+                    speedup_note = (
+                        f"observed_speedup={observed_speedup:.2f} "
+                        f"(probe_serial={serial_probe_seconds:.2f}s, "
+                        f"probe_parallel={float(probe_parallel_seconds):.2f}s, "
+                        f"probe_workers={probe_workers})."
+                    )
+                else:
+                    speedup_note = "parallel probe produced invalid elapsed; used conservative speedup=1.00."
+            except Exception as exc:
+                speedup_note = f"parallel probe failed ({exc.__class__.__name__}); used conservative speedup=1.00."
+    parallel_scale = 1.0 / observed_speedup
 
     eta = max(float(q50 * target_units * parallel_scale), 0.0)
     eta_low = max(float(q20 * target_units * parallel_scale), 0.0)
@@ -223,7 +270,7 @@ def estimate_main_bundle_runtime(
     note = (
         f"Pilot sampled {selected_count}/{len(specs)} cells with R={resolved_R}, "
         f"R_garch={resolved_Rg}; workers adjustment uses max_workers={workers}, "
-        f"efficiency={efficiency:.2f}."
+        f"{speedup_note}"
     )
     return RuntimeEstimate(
         eta_seconds=eta,
