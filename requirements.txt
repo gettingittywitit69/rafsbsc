@@ -1,8 +1,11 @@
 arch>=6.3
 matplotlib>=3.8
+nbformat>=4.2.0
 numpy>=1.24
 pandas>=2.0
 pandas-datareader>=0.10
+plotly>=5.0
+kaleido>=0.2.1
 pyarrow>=16.0
 scipy>=1.9
 seaborn>=0.13
