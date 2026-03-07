@@ -11,14 +11,21 @@ import numpy as np
 
 DEFAULT_START = "1926-07-01"
 _DEFAULT_START_TS = pd.Timestamp(DEFAULT_START)
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CACHE_DIR = _PROJECT_ROOT / "data" / "famafrench_cache"
 __all__ = ["KenFrenchLoader", "fetch_french25_excess", "fetch_french49_excess", "ensure_french_datasets"]
 
 
 def _normalize_index(idx) -> pd.DatetimeIndex:
     """Convert Ken French indices to month-end timestamps."""
-    if hasattr(idx, "to_timestamp"):
+    if isinstance(idx, pd.PeriodIndex):
         return idx.to_timestamp("M")
-    return pd.to_datetime(idx, format="%Y%m")
+    if isinstance(idx, pd.DatetimeIndex):
+        return idx
+    try:
+        return pd.to_datetime(idx, format="%Y%m")
+    except (TypeError, ValueError):
+        return pd.to_datetime(idx)
 
 
 class KenFrenchLoader:
@@ -30,7 +37,7 @@ class KenFrenchLoader:
     downloads during a notebook session.
     """
 
-    def __init__(self, cache_dir: Path | str = "data/famafrench_cache"):
+    def __init__(self, cache_dir: Path | str = DEFAULT_CACHE_DIR):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._memo = {}
@@ -40,6 +47,19 @@ class KenFrenchLoader:
         end_tag = pd.to_datetime(end_date).strftime("%Y%m") if end_date else "latest"
         safe_ds = dataset.replace("/", "_")
         return self.cache_dir / f"{safe_ds}_tbl{table}_{start_tag}_{end_tag}.csv"
+
+    def _candidate_cache_paths(
+        self,
+        dataset: str,
+        table: int,
+        start_date: Optional[str],
+        end_date: Optional[str],
+    ) -> list[Path]:
+        exact_path = self._cache_path(dataset, table, start_date, end_date)
+        if exact_path.exists():
+            return [exact_path]
+        safe_ds = dataset.replace("/", "_")
+        return sorted(self.cache_dir.glob(f"{safe_ds}_tbl{table}_*.csv"))
 
     def load_table(
         self,
@@ -53,9 +73,10 @@ class KenFrenchLoader:
             return self._memo[key].copy()
 
         cache_path = self._cache_path(dataset, table, start_date, end_date)
-        fetched_from_cache = cache_path.exists()
+        cached_paths = self._candidate_cache_paths(dataset, table, start_date, end_date)
+        fetched_from_cache = bool(cached_paths)
         if fetched_from_cache:
-            df = pd.read_csv(cache_path, index_col=0, parse_dates=True)
+            df = pd.read_csv(cached_paths[0], index_col=0, parse_dates=True)
         else:
             pdr_start = pd.to_datetime(start_date) if start_date is not None else None
             pdr_end = pd.to_datetime(end_date) if end_date is not None else None

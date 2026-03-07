@@ -39,6 +39,8 @@ __all__ = [
 ]
 
 DEFAULT_START = "1926-07-01"
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_CSV_CACHE_DIR = _PROJECT_ROOT / "data" / "famafrench_cache"
 
 _FTP_BASE = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/"
 
@@ -198,6 +200,30 @@ def _parse_all_tables(csv_text: str) -> List[pd.DataFrame]:
     return tables
 
 
+def _load_cached_table_csv(
+    dataset: str,
+    table: int,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> Optional[pd.DataFrame]:
+    safe_ds = dataset.replace("/", "_")
+    start_tag = pd.to_datetime(start_date).strftime("%Y%m") if start_date else "start"
+    end_tag = pd.to_datetime(end_date).strftime("%Y%m") if end_date else "latest"
+    exact = _CSV_CACHE_DIR / f"{safe_ds}_tbl{table}_{start_tag}_{end_tag}.csv"
+    candidates = [exact] if exact.exists() else sorted(_CSV_CACHE_DIR.glob(f"{safe_ds}_tbl{table}_*.csv"))
+    if not candidates:
+        return None
+
+    df = pd.read_csv(candidates[0], index_col=0, parse_dates=True)
+    df.index = pd.to_datetime(df.index)
+    df.index.name = "date"
+    if start_date is not None:
+        df = df[df.index >= pd.to_datetime(start_date)]
+    if end_date is not None:
+        df = df[df.index <= pd.to_datetime(end_date)]
+    return df
+
+
 def _fetch_ff_table(
     dataset: str,
     table: int = 0,
@@ -212,6 +238,10 @@ def _fetch_ff_table(
     - dataset: old pandas_datareader key (e.g. "25_Portfolios_5x5") or a ZIP filename.
     - table: zero-based table index among detected monthly/daily tables.
     """
+    cached_df = _load_cached_table_csv(dataset, table, start_date, end_date)
+    if cached_df is not None:
+        return cached_df
+
     zip_name = _resolve_zip_name(dataset)
     zip_bytes = _KF.fetch_zip_bytes(zip_name, force=force_download)
     text = _extract_first_csv_text(zip_bytes)
