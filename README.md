@@ -18,4 +18,24 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+## UCloud Setup
+
+`pip install -e .` only works when your current directory is the project root (the directory that contains `pyproject.toml`).
+If you run it from `/work` and the repo is in a subdirectory, installation fails.
+
+Use an absolute repo path on UCloud:
+
+```bash
+find /work -maxdepth 4 -name pyproject.toml
+python3 -m pip install -e /absolute/path/to/repo
+python3 -m ipykernel install --user --name rafsbsc --display-name "Python (rafsbsc)"
+```
+
+In the notebook, select kernel `Python (rafsbsc)` and verify:
+
+```python
+import sys
+print(sys.executable)
+```
+
 The notebooks still rely on live Ken French downloads for any dataset that is not already present under `data/`.
